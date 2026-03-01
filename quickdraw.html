@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quick Draw</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #1a0e00;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      min-height: 100vh;
+      font-family: Georgia, 'Times New Roman', serif;
+    }
+    #gameTitle { font-size: 1.4rem; font-weight: bold; letter-spacing: 8px; color: #D4A017; margin-bottom: 10px; }
+    canvas { display: block; border-radius: 4px; box-shadow: 0 8px 48px rgba(0,0,0,0.9); }
+    #hint { margin-top: 10px; font-size: 0.76rem; color: #5A4020; letter-spacing: 2px; }
+  </style>
+</head>
+<body>
+  <div id="gameTitle">&#9733; QUICK DRAW &#9733;</div>
+  <canvas id="game" width="800" height="440"></canvas>
+  <div id="hint">SPACE TO DRAW &nbsp;&middot;&nbsp; FIRE EARLY = FALSE START = YOU LOSE THE ROUND</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = 800, H = 440, GROUND_Y = 342;
+
+const PLAYER_X_START = 92,  PLAYER_X_END = 248;
+const AI_X_START     = 708, AI_X_END     = 552;
+const WALK_FRAMES    = 115;
+const GUN_Y          = GROUND_Y - 74;
+const PLAYER_GUN_X   = PLAYER_X_END + 42;
+const AI_GUN_X       = AI_X_END - 42;
+
+// ─── State ───────────────────────────────────────────────────────────────────
+let s, particles, spacePressed, spaceDown, frame;
+
+function resetMatch() {
+  s = {
+    phase: 'title',
+    playerWins: 0, aiWins: 0,
+    totalWins: +(localStorage.getItem('qdWins') || 0),
+    round: 1,
+    walkFrame: 0, standoffTimer: 0,
+    drawDelay: 0, aiReactionFrames: 0,
+    drawTimer: 0, playerReactionFrames: null,
+    winner: null,
+    resultTimer: 0,
+    drawFrame: 0,
+    bulletActive: false, bulletX: 0, bulletY: 0, bulletDX: 0,
+    loserFall: 0, shake: 0,
+  };
+  particles = []; spaceDown = false;
+}
+
+function startRound() {
+  s.phase = 'walkout'; s.walkFrame = 0;
+  s.standoffTimer = 0; s.drawTimer = 0;
+  s.playerReactionFrames = null; s.winner = null;
+  s.resultTimer = 0; s.drawFrame = 0;
+  s.bulletActive = false; s.loserFall = 0; s.shake = 0;
+  spaceDown = false; particles = [];
+}
+
+// ─── Input ───────────────────────────────────────────────────────────────────
+spacePressed = false; spaceDown = false; frame = 0;
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space') {
+    e.preventDefault();
+    if (!spaceDown) { spacePressed = true; spaceDown = true; }
+  }
+});
+document.addEventListener('keyup', e => { if (e.code === 'Space') spaceDown = false; });
+
+// ─── Game Loop ───────────────────────────────────────────────────────────────
+function gameLoop() {
+  frame++;
+  update();
+  render();
+  spacePressed = false;
+  requestAnimationFrame(gameLoop);
+}
+
+// ─── Update ──────────────────────────────────────────────────────────────────
+function update() {
+  if (s.shake > 0) s.shake *= 0.72;
+
+  switch (s.phase) {
+    case 'title':
+      if (spacePressed) { resetMatch(); startRound(); }
+      break;
+
+    case 'walkout':
+      s.walkFrame++;
+      if (s.walkFrame >= WALK_FRAMES) {
+        s.phase = 'standoff';
+        s.drawDelay = 90 + Math.floor(Math.random() * 130);
+        s.aiReactionFrames = 16 + Math.floor(Math.random() * 22);
+      }
+      break;
+
+    case 'standoff':
+      s.standoffTimer++;
+      if (spacePressed) {
+        s.winner = 'falsestart';
+        s.phase = 'roundover';
+        s.resultTimer = 230;
+      } else if (s.standoffTimer >= s.drawDelay) {
+        s.phase = 'draw';
+        s.drawTimer = 0;
+      }
+      break;
+
+    case 'draw':
+      s.drawTimer++;
+      if (spacePressed && s.playerReactionFrames === null) {
+        s.playerReactionFrames = s.drawTimer;
+        if (s.playerReactionFrames < s.aiReactionFrames) {
+          s.winner = 'player';
+          beginShooting();
+        }
+      }
+      if (s.drawTimer >= s.aiReactionFrames && s.winner === null) {
+        s.winner = 'ai';
+        beginShooting();
+      }
+      break;
+
+    case 'shooting':
+      if (s.drawFrame < 12) {
+        s.drawFrame++;
+        if (s.drawFrame === 7) s.bulletActive = true;
+      }
+      if (s.bulletActive) {
+        s.bulletX += s.bulletDX;
+        if (frame % 2 === 0) {
+          particles.push({ x: s.bulletX - s.bulletDX * 0.3, y: s.bulletY,
+            vx: (Math.random()-0.5)*0.8, vy: (Math.random()-0.5)*0.8,
+            life: 7, color: '#FFE080', size: 2 });
+        }
+        const targetX = s.winner === 'player' ? AI_X_END : PLAYER_X_END;
+        if ((s.bulletDX > 0 && s.bulletX >= targetX) || (s.bulletDX < 0 && s.bulletX <= targetX)) {
+          s.bulletActive = false;
+          s.shake = 16;
+          for (let i = 0; i < 16; i++) {
+            const a = Math.random() * Math.PI * 2, sp = 1.5 + Math.random() * 3.5;
+            particles.push({ x: targetX, y: GUN_Y,
+              vx: Math.cos(a)*sp, vy: Math.sin(a)*sp - 1,
+              life: 22 + Math.random()*14,
+              color: i < 8 ? '#D4A017' : (i < 12 ? '#FF4444' : '#CCC'),
+              size: 2 + Math.random() * 3 });
+          }
+        }
+      } else if (s.drawFrame >= 12) {
+        s.loserFall += 0.024;
+        if (s.loserFall >= 1) {
+          s.loserFall = 1;
+          s.phase = 'roundover';
+          s.resultTimer = 240;
+        }
+      }
+      break;
+
+    case 'roundover':
+      s.resultTimer--;
+      if (s.resultTimer <= 0) endRound();
+      break;
+
+    case 'matchover':
+      if (spacePressed) { s.playerWins = 0; s.aiWins = 0; s.round = 1; startRound(); }
+      break;
+  }
+
+  // Particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy; p.vy += 0.1; p.life--;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function beginShooting() {
+  s.phase = 'shooting'; s.drawFrame = 0; s.bulletActive = false;
+  const fromX = s.winner === 'player' ? PLAYER_GUN_X : AI_GUN_X;
+  s.bulletX = fromX; s.bulletY = GUN_Y;
+  s.bulletDX = s.winner === 'player' ? 24 : -24;
+  for (let i = 0; i < 10; i++) {
+    const a = (i / 10) * Math.PI * 2;
+    particles.push({ x: fromX, y: GUN_Y, vx: Math.cos(a)*3.5, vy: Math.sin(a)*3.5,
+      life: 10, color: i % 2 === 0 ? '#FFD700' : '#FFF', size: 3 });
+  }
+}
+
+function endRound() {
+  if (s.winner === 'player') s.playerWins++;
+  else s.aiWins++;
+  if (s.playerWins >= 2 || s.aiWins >= 2) {
+    s.phase = 'matchover';
+    if (s.playerWins >= 2) { s.totalWins++; localStorage.setItem('qdWins', s.totalWins); }
+  } else {
+    s.round++;
+    startRound();
+  }
+}
+
+// ─── Render ──────────────────────────────────────────────────────────────────
+function render() {
+  const sx = s.shake > 1 ? (Math.random()-0.5)*s.shake : 0;
+  const sy = s.shake > 1 ? (Math.random()-0.5)*s.shake*0.4 : 0;
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.clearRect(-20, -20, W+40, H+40);
+
+  drawBackground();
+  drawSaloon();
+  drawSheriff();
+  drawCowboys();
+  drawParticles();
+
+  if (s.bulletActive) {
+    ctx.fillStyle = '#FFE87C';
+    ctx.beginPath(); ctx.arc(s.bulletX, s.bulletY, 4, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#FFF';
+    ctx.beginPath(); ctx.arc(s.bulletX - s.bulletDX*0.15, s.bulletY, 2, 0, Math.PI*2); ctx.fill();
+  }
+
+  drawHUD();
+
+  if (s.phase === 'title')                              drawTitleScreen();
+  else if (s.phase === 'standoff' && s.standoffTimer > 45) drawGetReady();
+  else if (s.phase === 'draw')                          drawDrawText();
+  else if (s.phase === 'roundover')                     drawRoundResult();
+  else if (s.phase === 'matchover')                     drawMatchOver();
+
+  ctx.restore();
+}
+
+// ─── Background ──────────────────────────────────────────────────────────────
+function drawBackground() {
+  const sky = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  sky.addColorStop(0, '#4A88C8'); sky.addColorStop(0.55, '#C8814A'); sky.addColorStop(1, '#D4A06A');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, GROUND_Y);
+
+  // Sun
+  ctx.shadowColor = '#FFD700'; ctx.shadowBlur = 28;
+  ctx.fillStyle = '#FFE040';
+  ctx.beginPath(); ctx.arc(695, 62, 32, 0, Math.PI*2); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#FFF8A0';
+  ctx.beginPath(); ctx.arc(690, 56, 14, 0, Math.PI*2); ctx.fill();
+
+  // Mesa silhouettes
+  ctx.fillStyle = '#8B5E3C';
+  [[195,GROUND_Y-55,110,55],[340,GROUND_Y-38,80,38],[430,GROUND_Y-50,95,50],[540,GROUND_Y-42,75,42]].forEach(([x,y,w,h]) => {
+    ctx.fillRect(x, y, w, h);
+    ctx.beginPath(); ctx.moveTo(x-8,y); ctx.lineTo(x+w/2,y-18); ctx.lineTo(x+w+8,y); ctx.fill();
+  });
+
+  // Ground
+  const gnd = ctx.createLinearGradient(0, GROUND_Y, 0, H);
+  gnd.addColorStop(0, '#C4955A'); gnd.addColorStop(1, '#9A7038');
+  ctx.fillStyle = gnd; ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+
+  // Wheel ruts
+  ctx.strokeStyle = '#A07040'; ctx.lineWidth = 2;
+  [338, 362].forEach(y => { ctx.beginPath(); ctx.moveTo(185,y); ctx.lineTo(615,y); ctx.stroke(); });
+
+  // Pebbles
+  ctx.fillStyle = '#9A6A30';
+  [[260,356,3],[340,370,2],[400,352,3],[470,366,2.5],[540,358,2]].forEach(([x,y,r]) => {
+    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill();
+  });
+}
+
+// ─── Saloon ──────────────────────────────────────────────────────────────────
+function drawSaloon() {
+  // Main wall
+  ctx.fillStyle = '#7B5524'; ctx.fillRect(0, 0, 185, H);
+  ctx.strokeStyle = '#6A4A1E'; ctx.lineWidth = 1;
+  for (let y = 18; y < H; y += 26) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(185,y); ctx.stroke(); }
+
+  // False-front top
+  ctx.fillStyle = '#8B6330'; ctx.fillRect(0, 0, 185, 30);
+  ctx.fillStyle = '#3A2810';
+  [8,42,78,112,146].forEach(x => { ctx.fillRect(x, 0, 24, 18); });
+
+  // Sign
+  ctx.fillStyle = '#2A1608'; ctx.fillRect(16, 34, 153, 46);
+  ctx.strokeStyle = '#6A4A1E'; ctx.lineWidth = 2; ctx.strokeRect(16, 34, 153, 46);
+  ctx.fillStyle = '#D4A017'; ctx.font = 'bold 24px Georgia'; ctx.textAlign = 'center';
+  ctx.fillText('SALOON', 92, 66); ctx.textAlign = 'left';
+
+  // Awning
+  ctx.fillStyle = '#7A1E08'; ctx.fillRect(0, 86, 185, 22);
+  ctx.fillStyle = '#9B2A0E';
+  for (let x = 0; x < 185; x += 22) { ctx.beginPath(); ctx.arc(x+11, 108, 11, 0, Math.PI); ctx.fill(); }
+
+  // Support posts
+  ctx.fillStyle = '#5C3A1E';
+  ctx.fillRect(10, 108, 14, GROUND_Y - 108); ctx.fillRect(161, 108, 14, GROUND_Y - 108);
+
+  // Windows
+  [[24,118,52,58],[109,118,52,58]].forEach(([wx,wy,ww,wh]) => {
+    ctx.fillStyle = '#B8D8E8'; ctx.fillRect(wx,wy,ww,wh);
+    ctx.strokeStyle = '#3D2010'; ctx.lineWidth = 3; ctx.strokeRect(wx,wy,ww,wh);
+    ctx.beginPath(); ctx.moveTo(wx+ww/2,wy); ctx.lineTo(wx+ww/2,wy+wh); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(wx,wy+wh/2); ctx.lineTo(wx+ww,wy+wh/2); ctx.stroke();
+  });
+
+  // Door frame
+  ctx.fillStyle = '#2A1608'; ctx.fillRect(63, 200, 59, H - 200);
+  // Swing doors
+  ctx.fillStyle = '#4E7844'; ctx.fillRect(65,222,24,70); ctx.fillRect(95,222,24,70);
+  ctx.strokeStyle = '#3A5530'; ctx.lineWidth = 1.5;
+  ctx.strokeRect(65,222,24,70); ctx.strokeRect(95,222,24,70);
+  // Hinges
+  ctx.fillStyle = '#AAA';
+  [228,260,286].forEach(y => { ctx.fillRect(65,y,5,3); ctx.fillRect(114,y,5,3); });
+
+  // Steps
+  ctx.fillStyle = '#9A7A50'; ctx.fillRect(52,GROUND_Y-9,81,9);
+  ctx.fillStyle = '#B0905A'; ctx.fillRect(47,GROUND_Y-17,91,8);
+
+  // Barrel
+  ctx.fillStyle = '#5C3A1E';
+  ctx.beginPath(); ctx.ellipse(25,GROUND_Y-52,14,8,0,0,Math.PI*2); ctx.fill();
+  ctx.fillRect(11,GROUND_Y-80,28,28);
+  ctx.beginPath(); ctx.ellipse(25,GROUND_Y-80,14,8,0,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle = '#3D2010'; ctx.lineWidth = 2;
+  [GROUND_Y-74,GROUND_Y-63,GROUND_Y-54].forEach(y => { ctx.beginPath(); ctx.moveTo(11,y); ctx.lineTo(39,y); ctx.stroke(); });
+}
+
+// ─── Sheriff ─────────────────────────────────────────────────────────────────
+function drawSheriff() {
+  ctx.fillStyle = '#7B5524'; ctx.fillRect(615, 0, 185, H);
+  ctx.strokeStyle = '#6A4A1E'; ctx.lineWidth = 1;
+  for (let y = 18; y < H; y += 26) { ctx.beginPath(); ctx.moveTo(615,y); ctx.lineTo(800,y); ctx.stroke(); }
+
+  ctx.fillStyle = '#8B6330'; ctx.fillRect(615, 0, 185, 30);
+  ctx.fillStyle = '#3A2810';
+  [623,657,691,725,759].forEach(x => { ctx.fillRect(x,0,24,18); });
+
+  ctx.fillStyle = '#2A1608'; ctx.fillRect(631, 34, 153, 46);
+  ctx.strokeStyle = '#6A4A1E'; ctx.lineWidth = 2; ctx.strokeRect(631,34,153,46);
+  ctx.fillStyle = '#D4A017'; ctx.font = 'bold 21px Georgia'; ctx.textAlign = 'center';
+  ctx.fillText('SHERIFF', 708, 66); ctx.textAlign = 'left';
+
+  // Badge under sign
+  ctx.fillStyle = '#D4A017'; drawStar(708, 98, 13, 5.5);
+  ctx.strokeStyle = '#B88A10'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(708,98,14,0,Math.PI*2); ctx.stroke();
+
+  ctx.fillStyle = '#7A1E08'; ctx.fillRect(615, 86, 185, 22);
+  ctx.fillStyle = '#9B2A0E';
+  for (let x = 615; x < 800; x += 22) { ctx.beginPath(); ctx.arc(x+11,108,11,0,Math.PI); ctx.fill(); }
+
+  ctx.fillStyle = '#5C3A1E';
+  ctx.fillRect(615, 108, 14, GROUND_Y-108); ctx.fillRect(771,108,14,GROUND_Y-108);
+
+  // Two windows
+  [[637,122,58,66],[723,128,48,58]].forEach(([wx,wy,ww,wh]) => {
+    ctx.fillStyle = '#B8D8E8'; ctx.fillRect(wx,wy,ww,wh);
+    ctx.strokeStyle = '#3D2010'; ctx.lineWidth = 3; ctx.strokeRect(wx,wy,ww,wh);
+    ctx.beginPath(); ctx.moveTo(wx+ww/2,wy); ctx.lineTo(wx+ww/2,wy+wh); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(wx,wy+wh/2); ctx.lineTo(wx+ww,wy+wh/2); ctx.stroke();
+  });
+
+  // Solid door (sheriff's office)
+  ctx.fillStyle = '#2A1608'; ctx.fillRect(671,200,58,H-200);
+  ctx.fillStyle = '#6B4E2E'; ctx.fillRect(673,202,54,H-202);
+  ctx.strokeStyle = '#4A341E'; ctx.lineWidth = 2;
+  ctx.strokeRect(677,210,18,28); ctx.strokeRect(701,210,18,28);
+  ctx.strokeRect(677,248,18,28); ctx.strokeRect(701,248,18,28);
+  // Handle
+  ctx.fillStyle = '#D4A017'; ctx.beginPath(); ctx.arc(671,272,4,0,Math.PI*2); ctx.fill();
+
+  ctx.fillStyle = '#9A7A50'; ctx.fillRect(660,GROUND_Y-9,80,9);
+  ctx.fillStyle = '#B0905A'; ctx.fillRect(655,GROUND_Y-17,90,8);
+
+  ctx.fillStyle = '#5C3A1E';
+  ctx.beginPath(); ctx.ellipse(775,GROUND_Y-52,14,8,0,0,Math.PI*2); ctx.fill();
+  ctx.fillRect(761,GROUND_Y-80,28,28);
+  ctx.beginPath(); ctx.ellipse(775,GROUND_Y-80,14,8,0,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle = '#3D2010'; ctx.lineWidth = 2;
+  [GROUND_Y-74,GROUND_Y-63,GROUND_Y-54].forEach(y => { ctx.beginPath(); ctx.moveTo(761,y); ctx.lineTo(789,y); ctx.stroke(); });
+}
+
+// ─── Cowboys ─────────────────────────────────────────────────────────────────
+function getCowboyX(isPlayer) {
+  const t = Math.min(1, s.walkFrame / WALK_FRAMES);
+  const e = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+  return isPlayer
+    ? PLAYER_X_START + (PLAYER_X_END - PLAYER_X_START) * e
+    : AI_X_START     + (AI_X_END     - AI_X_START)     * e;
+}
+
+function drawCowboys() {
+  const walking = s.phase === 'walkout';
+  const atTitle  = s.phase === 'title';
+  if (atTitle) return;
+
+  const playerX = walking ? getCowboyX(true)  : PLAYER_X_END;
+  const aiX     = walking ? getCowboyX(false) : AI_X_END;
+
+  // shooting/result: one cowboy is fallen
+  const shootingPhases = ['shooting','roundover','matchover'];
+  const playerFallen = shootingPhases.includes(s.phase) && s.winner !== 'player' && s.winner !== 'falsestart';
+  const aiFallen     = shootingPhases.includes(s.phase) && s.winner === 'player';
+
+  // gun arm angles
+  const drawProg = Math.min(1, s.drawFrame / 12);
+  let playerGun = Math.PI * 0.44, aiGun = Math.PI * 0.44;
+  if (s.winner === 'player') playerGun = Math.PI * 0.44 * (1 - drawProg);
+  if (s.winner === 'ai')     aiGun     = Math.PI * 0.44 * (1 - drawProg);
+
+  // Clip cowboys to street during walkout so they emerge from doors
+  if (walking) {
+    ctx.save();
+    ctx.beginPath(); ctx.rect(185, 0, 430, H); ctx.clip();
+    drawCowboy(playerX, true,  true,  false, playerGun);
+    drawCowboy(aiX,     false, true,  false, aiGun);
+    ctx.restore();
+  } else {
+    drawCowboy(playerX, true,  false, playerFallen, playerGun);
+    drawCowboy(aiX,     false, false, aiFallen,     aiGun);
+  }
+}
+
+function drawCowboy(cx, isPlayer, walking, fallen, gunAngle) {
+  ctx.save();
+  ctx.translate(cx, GROUND_Y);
+
+  if (fallen) {
+    const fa = Math.min(1, s.loserFall);
+    ctx.translate(isPlayer ? -fa*22 : fa*22, 0);
+    ctx.rotate(fa * Math.PI * 0.5 * (isPlayer ? -1 : 1));
+  }
+
+  // Face direction: player faces right, AI faces left
+  ctx.scale(isPlayer ? 1 : -1, 1);
+
+  // Standoff sway
+  if (!walking && !fallen && (s.phase==='standoff'||s.phase==='draw')) {
+    ctx.translate(Math.sin(frame*0.035*(isPlayer?1:-0.9))*1.8, 0);
+  }
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.22)';
+  ctx.beginPath(); ctx.ellipse(0,-3,20,5,0,0,Math.PI*2); ctx.fill();
+
+  // Boots
+  const bootC = isPlayer ? '#2C1A0E' : '#111';
+  ctx.fillStyle = bootC;
+  ctx.fillRect(-14,-14,12,14); ctx.fillRect(2,-14,12,14);
+  ctx.fillRect(-16,-10,10,6);  ctx.fillRect(6,-10,10,6); // toe extension
+
+  // Legs
+  let legL=0, legR=0;
+  if (walking) { legL = Math.sin(frame*0.28)*13; legR = -legL; }
+  ctx.fillStyle = isPlayer ? '#8B7355' : '#2A2A2A';
+  ctx.save(); ctx.translate(-8,-42); ctx.rotate(legL*0.033); ctx.fillRect(-5,0,10,30); ctx.restore();
+  ctx.save(); ctx.translate( 8,-42); ctx.rotate(legR*0.033); ctx.fillRect(-5,0,10,30); ctx.restore();
+
+  // Belt + holster
+  ctx.fillStyle = '#2A1608'; ctx.fillRect(-14,-46,28,5);
+  ctx.fillStyle = '#C49A1A'; ctx.fillRect(-3,-47,6,7); // buckle
+  ctx.fillStyle = '#3D2010'; ctx.fillRect(8,-46,8,18); // holster
+
+  // Body
+  ctx.fillStyle = isPlayer ? '#1A3A6B' : '#1A1A1A';
+  ctx.fillRect(-13,-83,26,39);
+  // Vest panels
+  ctx.fillStyle = isPlayer ? '#4A2E10' : '#0D0D0D';
+  ctx.fillRect(-13,-83,8,37); ctx.fillRect(5,-83,8,37);
+  // Shirt front (centre gap in vest)
+  ctx.fillStyle = isPlayer ? '#2A5090' : '#222';
+  ctx.fillRect(-5,-83,10,37);
+
+  // Sheriff badge on AI
+  if (!isPlayer) {
+    ctx.fillStyle = '#D4A017'; drawStar(0,-68,6,2.5);
+  }
+
+  // Bandana on AI
+  if (!isPlayer) {
+    ctx.fillStyle = '#8B0000'; ctx.fillRect(-10,-92,20,9);
+    ctx.fillStyle = '#6B0000';
+    ctx.beginPath(); ctx.moveTo(-10,-83); ctx.lineTo(0,-76); ctx.lineTo(10,-83); ctx.fill();
+  }
+
+  // Left arm (non-gun)
+  const lArmSwing = walking ? Math.sin(frame*0.28+Math.PI)*0.32 : 0;
+  ctx.save();
+  ctx.translate(-13,-74); ctx.rotate(-lArmSwing);
+  ctx.strokeStyle = isPlayer ? '#D4956A' : '#C47A45';
+  ctx.lineWidth = 7; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-13,18); ctx.stroke();
+  ctx.restore();
+
+  // Gun arm (animated on draw)
+  ctx.save();
+  ctx.translate(13,-74); ctx.rotate(gunAngle);
+  ctx.strokeStyle = isPlayer ? '#D4956A' : '#C47A45';
+  ctx.lineWidth = 7; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(20,0); ctx.stroke();
+  // Gun body
+  ctx.fillStyle = '#777'; ctx.fillRect(14,-4,16,6);
+  ctx.fillStyle = '#555'; ctx.fillRect(18,2,6,8);
+  ctx.fillStyle = '#AAA'; ctx.fillRect(14,-4,3,2); // barrel shine
+  ctx.restore();
+
+  // Head
+  const headSway = (!walking && !fallen) ? Math.sin(frame*0.038)*1.5 : 0;
+  ctx.save(); ctx.translate(headSway,0);
+
+  ctx.fillStyle = isPlayer ? '#D4956A' : '#C47A45';
+  ctx.beginPath(); ctx.arc(0,-96,14,0,Math.PI*2); ctx.fill();
+
+  // AI stubble
+  if (!isPlayer) {
+    ctx.fillStyle = 'rgba(0,0,0,0.18)';
+    ctx.beginPath(); ctx.arc(0,-91,10,0,Math.PI); ctx.fill();
+  }
+
+  // Eye (on the right side since we face right, or left side mirrored)
+  ctx.fillStyle = '#FFF';
+  ctx.beginPath(); ctx.arc(6,-97,4,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#333';
+  ctx.beginPath(); ctx.arc(7,-97,2.5,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#FFF';
+  ctx.beginPath(); ctx.arc(8,-98,1,0,Math.PI*2); ctx.fill();
+
+  // Squint during standoff / draw
+  if (s.phase==='standoff'||s.phase==='draw') {
+    ctx.fillStyle = isPlayer ? '#D4956A' : '#C47A45';
+    ctx.fillRect(3,-101,10,3);
+  }
+
+  // Mouth
+  ctx.strokeStyle = '#9A5838'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(-5,-88); ctx.lineTo(5,-88); ctx.stroke();
+
+  // Hat brim
+  const brimW = isPlayer ? 19 : 22;
+  ctx.fillStyle = isPlayer ? '#7B4E28' : '#2A2A2A';
+  ctx.beginPath(); ctx.ellipse(0,-110,brimW,6,0,0,Math.PI*2); ctx.fill();
+  // Crown
+  const crW = isPlayer ? 11 : 13;
+  ctx.fillStyle = isPlayer ? '#5C3A1E' : '#111';
+  ctx.fillRect(-crW,-136,crW*2,28);
+  // Band
+  ctx.fillStyle = isPlayer ? '#3D2010' : '#8B0000';
+  ctx.fillRect(-crW,-116,crW*2,6);
+  // Crease
+  ctx.strokeStyle = isPlayer ? '#4A2E14' : '#000'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0,-136); ctx.lineTo(0,-116); ctx.stroke();
+
+  ctx.restore(); // head sway
+  ctx.restore(); // cowboy
+}
+
+// ─── Particles ────────────────────────────────────────────────────────────────
+function drawParticles() {
+  particles.forEach(p => {
+    ctx.globalAlpha = Math.min(1, Math.max(0, p.life / 25));
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI*2); ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+// ─── HUD ─────────────────────────────────────────────────────────────────────
+function drawHUD() {
+  if (s.phase === 'title' || s.phase === 'matchover') return;
+  // Round label
+  ctx.fillStyle = 'rgba(0,0,0,0.52)'; ctx.fillRect(W/2-90,7,180,30);
+  ctx.fillStyle = '#D4A017'; ctx.font = 'bold 15px Georgia'; ctx.textAlign = 'center';
+  ctx.fillText('ROUND ' + s.round + ' OF 3', W/2, 27);
+  // Scores
+  ctx.font = '14px Georgia'; ctx.textAlign = 'left';
+  ctx.fillStyle = '#D4A017';
+  ctx.fillText('YOU: ' + '★'.repeat(s.playerWins) + '☆'.repeat(2-s.playerWins), 18, 28);
+  ctx.textAlign = 'right';
+  ctx.fillText('SHERIFF: ' + '☆'.repeat(2-s.aiWins) + '★'.repeat(s.aiWins), W-18, 28);
+  ctx.textAlign = 'left';
+}
+
+// ─── Overlays ────────────────────────────────────────────────────────────────
+function drawGetReady() {
+  const elapsed = s.standoffTimer - 45;
+  const a = Math.min(1, elapsed / 25) * (0.5 + Math.sin(frame * 0.06) * 0.3);
+  ctx.globalAlpha = a;
+  ctx.fillStyle = '#DDD'; ctx.font = 'bold 19px Georgia'; ctx.textAlign = 'center';
+  ctx.fillText('GET READY . . .', W/2, 92);
+  ctx.globalAlpha = 1; ctx.textAlign = 'left';
+}
+
+function drawDrawText() {
+  const pulse = 0.72 + Math.sin(frame * 0.4) * 0.28;
+  ctx.globalAlpha = pulse;
+  ctx.shadowColor = '#FF0000'; ctx.shadowBlur = 35;
+  ctx.fillStyle = '#CC1111'; ctx.font = 'bold 88px Georgia'; ctx.textAlign = 'center';
+  ctx.fillText('DRAW!', W/2, H/2 + 24);
+  ctx.shadowBlur = 0; ctx.globalAlpha = 1; ctx.textAlign = 'left';
+}
+
+function drawRoundResult() {
+  ctx.fillStyle = 'rgba(0,0,0,0.68)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign = 'center';
+
+  if (s.winner === 'falsestart') {
+    ctx.fillStyle = '#FF8C00'; ctx.font = 'bold 52px Georgia';
+    ctx.fillText('FALSE START!', W/2, H/2 - 28);
+    ctx.fillStyle = '#DDD'; ctx.font = '20px Georgia';
+    ctx.fillText('You fired before DRAW!', W/2, H/2 + 14);
+  } else {
+    const won = s.winner === 'player';
+    ctx.fillStyle = won ? '#D4A017' : '#CC2222';
+    ctx.font = 'bold 58px Georgia';
+    ctx.fillText(won ? 'YOU WIN!' : 'YOU LOSE!', W/2, H/2 - 30);
+    if (s.playerReactionFrames !== null) {
+      const pMs = Math.round(s.playerReactionFrames * 16.67);
+      const aMs = Math.round(s.aiReactionFrames * 16.67);
+      ctx.fillStyle = '#DDD'; ctx.font = '18px Georgia';
+      ctx.fillText('Your time: ' + pMs + 'ms', W/2, H/2 + 12);
+      ctx.fillStyle = '#AAA'; ctx.font = '15px Georgia';
+      ctx.fillText("Sheriff's time: " + aMs + 'ms', W/2, H/2 + 36);
+    }
+  }
+  ctx.fillStyle = '#666'; ctx.font = '13px Georgia';
+  ctx.fillText('next round...', W/2, H/2 + 68);
+  ctx.textAlign = 'left';
+}
+
+function drawMatchOver() {
+  ctx.fillStyle = 'rgba(8,4,0,0.90)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign = 'center';
+  const won = s.playerWins >= 2;
+  ctx.fillStyle = won ? '#D4A017' : '#CC2222';
+  ctx.font = 'bold 48px Georgia';
+  ctx.fillText(won ? 'DUEL WON!' : 'THE SHERIFF WINS!', W/2, H/2 - 54);
+  ctx.fillStyle = '#DDD'; ctx.font = 'bold 26px Georgia';
+  ctx.fillText(s.playerWins + '  —  ' + s.aiWins, W/2, H/2 - 10);
+  ctx.fillStyle = '#C8A040'; ctx.font = '16px Georgia';
+  ctx.fillText('Total Duels Won: ' + s.totalWins, W/2, H/2 + 22);
+  ctx.fillStyle = '#888'; ctx.font = '18px Georgia';
+  ctx.fillText('Press SPACE to challenge again', W/2, H/2 + 58);
+  ctx.textAlign = 'left';
+}
+
+function drawTitleScreen() {
+  ctx.fillStyle = 'rgba(8,4,0,0.78)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#8B6010'; ctx.shadowBlur = 24;
+  ctx.fillStyle = '#D4A017'; ctx.font = 'bold 66px Georgia';
+  ctx.fillText('QUICK DRAW', W/2, H/2 - 44);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#CCC'; ctx.font = '19px Georgia';
+  ctx.fillText('Press SPACE to challenge the Sheriff', W/2, H/2 + 6);
+  ctx.fillStyle = '#999'; ctx.font = '14px Georgia';
+  ctx.fillText('When DRAW! appears — hit SPACE as fast as you can', W/2, H/2 + 34);
+  ctx.fillText('Best of 3 rounds per duel', W/2, H/2 + 56);
+  if (s.totalWins > 0) {
+    ctx.fillStyle = '#D4A017'; ctx.font = '13px Georgia';
+    ctx.fillText('Duels Won: ' + s.totalWins, W/2, H/2 + 84);
+  }
+  ctx.textAlign = 'left';
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function drawStar(cx, cy, outerR, innerR) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = (Math.PI/5)*i - Math.PI/2, r = i%2===0 ? outerR : innerR;
+    i===0 ? ctx.moveTo(cx+r*Math.cos(a),cy+r*Math.sin(a))
+           : ctx.lineTo(cx+r*Math.cos(a),cy+r*Math.sin(a));
+  }
+  ctx.closePath(); ctx.fill();
+}
+
+// ─── Boot ────────────────────────────────────────────────────────────────────
+resetMatch();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
