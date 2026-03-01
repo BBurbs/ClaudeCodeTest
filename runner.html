@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Biome Runner</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0a0a14;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: 'Segoe UI', Tahoma, sans-serif;
+    }
+    #gameTitle {
+      font-size: 1.6rem;
+      font-weight: bold;
+      letter-spacing: 6px;
+      color: #e94560;
+      margin-bottom: 12px;
+      text-transform: uppercase;
+    }
+    canvas {
+      border-radius: 10px;
+      box-shadow: 0 8px 48px rgba(0,0,0,0.8);
+      display: block;
+    }
+    #hint {
+      margin-top: 10px;
+      font-size: 0.78rem;
+      color: #444;
+      letter-spacing: 1px;
+    }
+  </style>
+</head>
+<body>
+  <div id="gameTitle">Biome Runner</div>
+  <canvas id="game" width="800" height="320"></canvas>
+  <div id="hint">↑ JUMP &nbsp;·&nbsp; ↓ DUCK &nbsp;·&nbsp; SPACE START / RESTART</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// ─── Constants ─────────────────────────────────────────────────────────────
+const W = 800, H = 320;
+const GROUND_Y   = 248;   // top surface of ground
+const PLAYER_X   = 100;
+const PW         = 26;    // player width
+const PH_RUN     = 56;    // player height running
+const PH_DUCK    = 26;    // player height ducking
+const GRAVITY    = 0.58;
+const JUMP_VY    = -13.5;
+const BASE_SPEED = 4.5;
+const MAX_SPEED  = 14;
+const DIST_FOREST = 2800;
+const DIST_LAVA   = 6500;
+
+// Obstacle dimensions: { w, h }
+const OBS_SIZES = {
+  rock:       { w:48, h:38 }, cactus:    { w:28, h:76 }, lizard:     { w:52, h:22 },
+  log:        { w:68, h:32 }, mushroom:  { w:38, h:52 }, rabbit:     { w:32, h:42 },
+  lavarock:   { w:52, h:44 }, fire:      { w:30, h:70 }, salamander: { w:50, h:24 },
+};
+const OBS_BIOME = {
+  desert: ['rock','cactus','lizard'],
+  forest: ['log','mushroom','rabbit'],
+  lava:   ['lavarock','fire','salamander'],
+};
+const PUP_TYPES = ['star','boots','shield'];
+
+// ─── State ─────────────────────────────────────────────────────────────────
+let s, p, obstacles, powerups, particles, keys, jumpPressed, frame;
+let scrollFar = 0, scrollMid = 0;
+
+function resetGame() {
+  s = {
+    started: false, over: false,
+    score: 0,
+    hi: +(localStorage.getItem('bmr_hi') || 0),
+    dist: 0, speed: BASE_SPEED,
+    biome: 'desert',
+    bannerTick: 0, bannerText: '', bannerColor: '#fff',
+    mult: 1, multTimer: 0,
+    shield: false, shieldTimer: 0,
+    boost: false, boostTimer: 0,
+    obsTimer: 0, obsInterval: 100,
+    pupTimer: 0, pupInterval: randPupInterval(),
+  };
+  p = { y: GROUND_Y - PH_RUN, vy: 0, ducking: false, onGround: true };
+  obstacles = []; powerups = []; particles = [];
+  frame = 0; scrollFar = 0; scrollMid = 0;
+}
+
+function randPupInterval() { return 380 + Math.random() * 340; }
+
+// ─── Input ─────────────────────────────────────────────────────────────────
+keys = {}; jumpPressed = false;
+document.addEventListener('keydown', e => {
+  if (['ArrowUp','ArrowDown','Space'].includes(e.code)) e.preventDefault();
+  if (!keys[e.code] && (e.code === 'Space' || e.code === 'ArrowUp')) jumpPressed = true;
+  keys[e.code] = true;
+});
+document.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// ─── Game Loop ──────────────────────────────────────────────────────────────
+function gameLoop() {
+  frame++;
+
+  // Start / restart on jump key
+  if (jumpPressed) {
+    if (!s.started) { s.started = true; }     // keep jumpPressed for update() to jump
+    else if (s.over) { resetGame(); s.started = true; jumpPressed = false; }
+  }
+
+  update();
+  render();
+  requestAnimationFrame(gameLoop);
+}
+
+// ─── Update ────────────────────────────────────────────────────────────────
+function update() {
+  if (!s.started || s.over) return;
+
+  // Speed & distance
+  s.speed = Math.min(BASE_SPEED + s.dist / 700, MAX_SPEED);
+  if (s.boost) s.speed = Math.min(s.speed + 3, MAX_SPEED);
+  scrollFar += s.speed * 0.18;
+  scrollMid += s.speed * 0.48;
+  s.dist += s.speed * 0.075;
+  s.score += s.mult;
+
+  // Biome transitions
+  if (s.biome === 'desert' && s.dist >= DIST_FOREST) {
+    s.biome = 'forest'; s.bannerText = 'ENTERING FOREST';
+    s.bannerColor = '#81C784'; s.bannerTick = 200;
+    obstacles.length = 0; powerups.length = 0;
+  } else if (s.biome === 'forest' && s.dist >= DIST_LAVA) {
+    s.biome = 'lava'; s.bannerText = 'ENTERING LAVA FIELDS';
+    s.bannerColor = '#FF7043'; s.bannerTick = 200;
+    obstacles.length = 0; powerups.length = 0;
+  }
+  if (s.bannerTick > 0) s.bannerTick--;
+
+  // Power-up timers
+  if (s.multTimer  > 0 && --s.multTimer  === 0) s.mult = 1;
+  if (s.shieldTimer > 0 && --s.shieldTimer === 0) s.shield = false;
+  if (s.boostTimer  > 0 && --s.boostTimer  === 0) s.boost  = false;
+
+  // Player input
+  const jp = jumpPressed; jumpPressed = false;
+  p.ducking = (keys['ArrowDown'] || keys['KeyS']) && p.onGround;
+  if (jp && p.onGround && !p.ducking) {
+    p.vy = JUMP_VY; p.onGround = false;
+    dustAt(PLAYER_X + PW / 2, GROUND_Y);
+  }
+
+  // Physics
+  if (!p.ducking) { p.vy += GRAVITY; p.y += p.vy; }
+  const floorY = GROUND_Y - (p.ducking ? PH_DUCK : PH_RUN);
+  if (p.y >= floorY) {
+    if (!p.onGround && !p.ducking) dustAt(PLAYER_X + PW / 2, GROUND_Y);
+    p.y = floorY; p.vy = 0; p.onGround = true;
+  }
+
+  // Move obstacles
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    const o = obstacles[i];
+    o.x -= s.speed;
+    if (!o.scored && o.x + o.w < PLAYER_X) { o.scored = true; s.score += 50 * s.mult; }
+    if (o.x + o.w < -30) obstacles.splice(i, 1);
+  }
+
+  // Move power-ups
+  for (let i = powerups.length - 1; i >= 0; i--) {
+    const pu = powerups[i];
+    pu.x -= s.speed;
+    pu.y = (GROUND_Y - 62) + Math.sin(frame * 0.07 + pu.bob) * 9;
+    if (pu.x + pu.w < -30) powerups.splice(i, 1);
+  }
+
+  // Particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const pt = particles[i];
+    pt.x += pt.vx; pt.y += pt.vy; pt.vy += 0.14; pt.life--;
+    if (pt.life <= 0) particles.splice(i, 1);
+  }
+  // Lava embers
+  if (s.biome === 'lava' && Math.random() < 0.07) {
+    particles.push({ x: Math.random() * W, y: GROUND_Y,
+      vx: (Math.random() - 0.5) * 1.5, vy: -2 - Math.random() * 3,
+      life: 30 + Math.random() * 40, color: Math.random() < 0.5 ? '#FF6B00' : '#FFCC00',
+      size: 2 + Math.random() * 2, ember: true });
+  }
+
+  checkCollisions();
+  spawnEntities();
+}
+
+function playerHitbox() {
+  if (p.ducking) return { x: PLAYER_X - 2, y: GROUND_Y - PH_DUCK + 4, w: PW + 8, h: PH_DUCK - 4 };
+  return { x: PLAYER_X + 5, y: p.y + 8, w: PW - 8, h: PH_RUN - 12 };
+}
+
+function overlaps(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function checkCollisions() {
+  const ph = playerHitbox();
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    if (overlaps(ph, obstacles[i])) {
+      const o = obstacles[i];
+      if (s.shield) {
+        s.shield = false; s.shieldTimer = 0; obstacles.splice(i, 1);
+        sparkles(o.x + o.w / 2, o.y + o.h / 2, '#42A5F5', 12);
+      } else { triggerGameOver(); }
+      return;
+    }
+  }
+  for (let i = powerups.length - 1; i >= 0; i--) {
+    const pu = powerups[i];
+    if (overlaps(ph, { x: pu.x, y: pu.y, w: pu.w, h: pu.h })) {
+      collectPup(pu); sparkles(pu.x + pu.w / 2, pu.y + pu.h / 2, pupColor(pu.type), 18);
+      powerups.splice(i, 1);
+    }
+  }
+}
+
+function collectPup(pu) {
+  if      (pu.type === 'star')   { s.mult = 2; s.multTimer = 360; }
+  else if (pu.type === 'boots')  { s.boost = true; s.boostTimer = 240; }
+  else if (pu.type === 'shield') { s.shield = true; s.shieldTimer = 9999; }
+}
+
+function pupColor(t) { return t === 'star' ? '#FFD600' : t === 'boots' ? '#FF8C00' : '#42A5F5'; }
+
+function triggerGameOver() {
+  s.over = true;
+  s.score = Math.floor(s.score);
+  if (s.score > s.hi) { s.hi = s.score; localStorage.setItem('bmr_hi', s.hi); }
+  sparkles(PLAYER_X + PW / 2, p.y + PH_RUN / 2, '#e94560', 22);
+}
+
+function spawnEntities() {
+  s.obsTimer++;
+  if (s.obsTimer >= s.obsInterval) {
+    s.obsTimer = 0;
+    s.obsInterval = 78 + Math.random() * 105;
+    const types = OBS_BIOME[s.biome];
+    const type  = types[Math.floor(Math.random() * types.length)];
+    const sz = OBS_SIZES[type];
+    obstacles.push({ x: W + 10, y: GROUND_Y - sz.h, w: sz.w, h: sz.h, type, scored: false });
+  }
+  s.pupTimer++;
+  if (s.pupTimer >= s.pupInterval) {
+    s.pupTimer = 0; s.pupInterval = randPupInterval();
+    const type = PUP_TYPES[Math.floor(Math.random() * PUP_TYPES.length)];
+    powerups.push({ x: W + 10, y: GROUND_Y - 62, w: 32, h: 32, type, bob: Math.random() * Math.PI * 2 });
+  }
+}
+
+function dustAt(x, y) {
+  for (let i = 0; i < 5; i++) particles.push({
+    x, y, vx: (Math.random() - 0.5) * 2.5, vy: -Math.random() * 1.8 - 0.3,
+    life: 18 + Math.random() * 14, color: s.biome === 'lava' ? '#888' : s.biome === 'forest' ? '#795548' : '#C8A97E',
+    size: 3 + Math.random() * 3,
+  });
+}
+
+function sparkles(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    const a = (Math.PI * 2 / count) * i, spd = 2 + Math.random() * 3;
+    particles.push({ x, y, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd,
+      life: 22 + Math.random() * 18, color, size: 3 + Math.random() * 3 });
+  }
+}
+
+// ─── Render ─────────────────────────────────────────────────────────────────
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  drawBackground();
+  drawParticles();
+  drawObstacles();
+  drawPowerups();
+  drawPlayer();
+  drawHUD();
+  if (s.bannerTick > 0)  drawBiomeBanner();
+  if (!s.started)        drawStartScreen();
+  else if (s.over)       drawGameOver();
+}
+
+// ─── Background ─────────────────────────────────────────────────────────────
+const BIOME_THEME = {
+  desert: { skyT: '#4DABD4', skyB: '#F5C862', gnd: '#C2956C', gndD: '#A67B5B' },
+  forest: { skyT: '#3B7A57', skyB: '#A8D5A2', gnd: '#5D4037', gndD: '#3E2723' },
+  lava:   { skyT: '#5C0000', skyB: '#CC3300', gnd: '#180000', gndD: '#0D0000' },
+};
+
+function drawBackground() {
+  const t = BIOME_THEME[s.biome];
+  const sky = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  sky.addColorStop(0, t.skyT); sky.addColorStop(1, t.skyB);
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, GROUND_Y);
+
+  if (s.biome === 'desert')      drawDesertBg(t);
+  else if (s.biome === 'forest') drawForestBg(t);
+  else                           drawLavaBg(t);
+
+  // Ground fill
+  const gf = ctx.createLinearGradient(0, GROUND_Y, 0, H);
+  gf.addColorStop(0, t.gnd); gf.addColorStop(0.15, t.gndD); gf.addColorStop(1, t.gndD);
+  ctx.fillStyle = gf; ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+
+  // Ground surface line
+  ctx.fillStyle = t.gnd; ctx.fillRect(0, GROUND_Y, W, 5);
+  ctx.strokeStyle = t.gndD; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, GROUND_Y + 5); ctx.lineTo(W, GROUND_Y + 5); ctx.stroke();
+
+  // Ground texture dots
+  if (s.biome !== 'lava') {
+    ctx.fillStyle = t.gndD;
+    for (let x = -(scrollMid % 55); x < W; x += 55) {
+      ctx.beginPath(); ctx.ellipse(x, GROUND_Y + 3, 4, 2, 0, 0, Math.PI * 2); ctx.fill();
+    }
+  } else {
+    // Lava cracks
+    ctx.strokeStyle = 'rgba(255,80,0,0.55)'; ctx.lineWidth = 1.5;
+    const co = scrollMid % 100;
+    for (let x = -co; x < W; x += 100) {
+      ctx.beginPath(); ctx.moveTo(x, GROUND_Y);
+      ctx.lineTo(x + 12, GROUND_Y + 8); ctx.lineTo(x + 22, GROUND_Y + 4);
+      ctx.lineTo(x + 30, GROUND_Y + 12); ctx.stroke();
+    }
+  }
+}
+
+function drawDesertBg(t) {
+  // Sun
+  const sunX = 690 - (scrollFar % 600) * 0.04;
+  ctx.fillStyle = '#FFD700';
+  ctx.beginPath(); ctx.arc(sunX, 58, 36, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#FFF59D';
+  ctx.beginPath(); ctx.arc(sunX - 4, 54, 18, 0, Math.PI * 2); ctx.fill();
+
+  // Far dunes
+  ctx.fillStyle = '#D4A96A';
+  const fo = scrollFar % 380;
+  ctx.beginPath(); ctx.moveTo(-fo, GROUND_Y);
+  for (let x = -fo; x <= W + 60; x += 60)
+    ctx.quadraticCurveTo(x + 30, GROUND_Y - 52, x + 60, GROUND_Y);
+  ctx.lineTo(W, GROUND_Y); ctx.lineTo(0, GROUND_Y); ctx.closePath(); ctx.fill();
+
+  // Near dunes
+  ctx.fillStyle = '#C8975D';
+  const mo = scrollMid % 280;
+  ctx.beginPath(); ctx.moveTo(-mo, GROUND_Y);
+  for (let x = -mo; x <= W + 80; x += 80)
+    ctx.quadraticCurveTo(x + 40, GROUND_Y - 32, x + 80, GROUND_Y);
+  ctx.lineTo(W, GROUND_Y); ctx.lineTo(0, GROUND_Y); ctx.closePath(); ctx.fill();
+}
+
+function drawForestBg(t) {
+  // Clouds
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  const clouds = [[80,38,28],[310,55,22],[540,32,32],[710,48,25]];
+  clouds.forEach(([cx, cy, cr]) => {
+    const x = ((cx - scrollFar * 0.3) % 800 + 800) % 800;
+    ctx.beginPath();
+    ctx.arc(x, cy, cr, 0, Math.PI * 2);
+    ctx.arc(x + cr * 0.85, cy - cr * 0.35, cr * 0.7, 0, Math.PI * 2);
+    ctx.arc(x - cr * 0.5, cy - cr * 0.2, cr * 0.6, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Far tree silhouettes
+  ctx.fillStyle = '#2D5A3D';
+  const fo = scrollFar % 180;
+  for (let x = -fo; x < W + 50; x += 75) {
+    const th = 78 + Math.sin(x * 0.14) * 22;
+    ctx.beginPath();
+    ctx.moveTo(x + 18, GROUND_Y - th);
+    ctx.lineTo(x, GROUND_Y - th * 0.4);
+    ctx.lineTo(x + 36, GROUND_Y - th * 0.4);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(x + 18, GROUND_Y - th * 0.65);
+    ctx.lineTo(x - 5, GROUND_Y - th * 0.2);
+    ctx.lineTo(x + 41, GROUND_Y - th * 0.2);
+    ctx.closePath(); ctx.fill();
+    ctx.fillRect(x + 14, GROUND_Y - th * 0.2, 8, th * 0.2);
+  }
+
+  // Mid trees
+  ctx.fillStyle = '#3D7A55';
+  const mo = scrollMid % 140;
+  for (let x = -mo; x < W + 40; x += 58) {
+    const th = 52 + Math.sin(x * 0.22) * 14;
+    ctx.beginPath();
+    ctx.moveTo(x + 13, GROUND_Y - th);
+    ctx.lineTo(x - 2, GROUND_Y - th * 0.38);
+    ctx.lineTo(x + 28, GROUND_Y - th * 0.38);
+    ctx.closePath(); ctx.fill();
+    ctx.fillRect(x + 9, GROUND_Y - th * 0.38, 8, th * 0.38);
+  }
+}
+
+function drawLavaBg(t) {
+  // Horizon glow
+  const hg = ctx.createLinearGradient(0, GROUND_Y - 70, 0, GROUND_Y);
+  hg.addColorStop(0, 'rgba(255,80,0,0)'); hg.addColorStop(1, 'rgba(255,60,0,0.45)');
+  ctx.fillStyle = hg; ctx.fillRect(0, GROUND_Y - 70, W, 70);
+
+  // Distant lava lakes
+  ctx.fillStyle = '#FF4500';
+  const lo = scrollFar % 280;
+  for (let x = -lo; x < W + 100; x += 220) {
+    ctx.beginPath(); ctx.ellipse(x + 90, GROUND_Y - 9, 65, 9, 0, 0, Math.PI * 2); ctx.fill();
+    // Lake glow
+    const lg = ctx.createRadialGradient(x + 90, GROUND_Y - 9, 0, x + 90, GROUND_Y - 9, 65);
+    lg.addColorStop(0, 'rgba(255,120,0,0.25)'); lg.addColorStop(1, 'rgba(255,60,0,0)');
+    ctx.fillStyle = lg;
+    ctx.beginPath(); ctx.ellipse(x + 90, GROUND_Y - 9, 90, 30, 0, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Rocky spires
+  ctx.fillStyle = '#1C0000';
+  const so = scrollMid % 220;
+  for (let x = -so; x < W + 40; x += 88) {
+    const sh = 48 + Math.sin(x * 0.16) * 22;
+    ctx.beginPath();
+    ctx.moveTo(x + 14, GROUND_Y - sh);
+    ctx.lineTo(x, GROUND_Y); ctx.lineTo(x + 28, GROUND_Y);
+    ctx.closePath(); ctx.fill();
+  }
+
+  // Ground glow (override the generic ground fill with lava)
+  const gg = ctx.createLinearGradient(0, GROUND_Y, 0, H);
+  gg.addColorStop(0, '#AA1100'); gg.addColorStop(0.3, '#660000'); gg.addColorStop(1, '#0D0000');
+  ctx.fillStyle = gg; ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+}
+
+// ─── Obstacle Drawing ───────────────────────────────────────────────────────
+function drawObstacles() {
+  obstacles.forEach(o => { ctx.save(); drawObs(o); ctx.restore(); });
+}
+
+function drawObs(o) {
+  const { x, y, w, h, type } = o;
+  ctx.save();
+  switch (type) {
+    case 'rock':       drawRock(x, y, w, h);       break;
+    case 'cactus':     drawCactus(x, y, w, h);     break;
+    case 'lizard':     drawLizard(x, y, w, h);     break;
+    case 'log':        drawLog(x, y, w, h);         break;
+    case 'mushroom':   drawMushroom(x, y, w, h);   break;
+    case 'rabbit':     drawRabbit(x, y, w, h);     break;
+    case 'lavarock':   drawLavaRock(x, y, w, h);   break;
+    case 'fire':       drawFire(x, y, w, h);       break;
+    case 'salamander': drawSalamander(x, y, w, h); break;
+  }
+  ctx.restore();
+}
+
+function rrect(x, y, w, h, r) {
+  const R = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + R, y);
+  ctx.lineTo(x + w - R, y); ctx.quadraticCurveTo(x + w, y, x + w, y + R);
+  ctx.lineTo(x + w, y + h - R); ctx.quadraticCurveTo(x + w, y + h, x + w - R, y + h);
+  ctx.lineTo(x + R, y + h); ctx.quadraticCurveTo(x, y + h, x, y + h - R);
+  ctx.lineTo(x, y + R); ctx.quadraticCurveTo(x, y, x + R, y);
+  ctx.closePath();
+}
+
+function drawRock(x, y, w, h) {
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.beginPath(); ctx.ellipse(x + w/2, GROUND_Y + 3, w/2, 5, 0, 0, Math.PI*2); ctx.fill();
+  // Body
+  ctx.fillStyle = '#8B7355';
+  ctx.beginPath();
+  ctx.moveTo(x + 4, y + h);
+  ctx.lineTo(x, y + h * 0.52);
+  ctx.lineTo(x + w * 0.15, y + h * 0.12);
+  ctx.lineTo(x + w * 0.48, y);
+  ctx.lineTo(x + w * 0.82, y + h * 0.16);
+  ctx.lineTo(x + w, y + h * 0.42);
+  ctx.lineTo(x + w - 4, y + h);
+  ctx.closePath(); ctx.fill();
+  // Highlight
+  ctx.fillStyle = '#A0916B';
+  ctx.beginPath();
+  ctx.moveTo(x + w * 0.18, y + h * 0.16);
+  ctx.lineTo(x + w * 0.48, y + h * 0.04);
+  ctx.lineTo(x + w * 0.66, y + h * 0.2);
+  ctx.lineTo(x + w * 0.38, y + h * 0.36);
+  ctx.closePath(); ctx.fill();
+}
+
+function drawCactus(x, y, w, h) {
+  const cx = x + w / 2;
+  ctx.fillStyle = '#4A7C59';
+  ctx.fillRect(cx - 5, y, 10, h);                         // trunk
+  ctx.fillRect(cx - 15, y + h * 0.36, 11, 6);             // left arm horiz
+  ctx.fillRect(cx - 15, y + h * 0.16, 6, h * 0.2 + 6);   // left arm vert
+  ctx.fillRect(cx + 4, y + h * 0.44, 11, 6);              // right arm horiz
+  ctx.fillRect(cx + 9, y + h * 0.24, 6, h * 0.2 + 6);    // right arm vert
+  // Highlight
+  ctx.fillStyle = '#5E9B6D';
+  ctx.fillRect(cx - 3, y + 3, 3, h - 6);
+  ctx.fillRect(cx - 13, y + h * 0.18, 2, h * 0.18);
+}
+
+function drawLizard(x, y, w, h) {
+  const bob = Math.sin(frame * 0.3) * 3;
+  ctx.fillStyle = 'rgba(0,0,0,0.12)';
+  ctx.beginPath(); ctx.ellipse(x + w/2, GROUND_Y + 2, w/2, 3, 0, 0, Math.PI*2); ctx.fill();
+  // Tail
+  ctx.strokeStyle = '#6B8E23'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(x + 6, y + h/2 + 2);
+  ctx.quadraticCurveTo(x - 10, y + h * 0.15, x - 22, y + h/2); ctx.stroke();
+  // Body
+  ctx.fillStyle = '#7B9E2E';
+  ctx.beginPath(); ctx.ellipse(x + w * 0.42, y + h/2, w * 0.36, h/2, 0, 0, Math.PI*2); ctx.fill();
+  // Head
+  ctx.fillStyle = '#6B8E23';
+  ctx.beginPath(); ctx.ellipse(x + w - 5, y + h/2 - 1, 10, 7, 0.3, 0, Math.PI*2); ctx.fill();
+  // Eye
+  ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(x + w - 2, y + h/2 - 3, 2, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x + w - 1.4, y + h/2 - 3.5, 0.8, 0, Math.PI*2); ctx.fill();
+  // Legs
+  ctx.strokeStyle = '#5A7A1E'; ctx.lineWidth = 2.5;
+  [[x + w*0.25, -1],[x + w*0.5, 1]].forEach(([lx, d]) => {
+    ctx.beginPath(); ctx.moveTo(lx, y + h * 0.65); ctx.lineTo(lx - 7, y + h + bob * d); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(lx, y + h * 0.65); ctx.lineTo(lx + 6, y + h - bob * d); ctx.stroke();
+  });
+}
+
+function drawLog(x, y, w, h) {
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.beginPath(); ctx.ellipse(x + w/2, GROUND_Y + 3, w/2, 4, 0, 0, Math.PI*2); ctx.fill();
+  // Body
+  ctx.fillStyle = '#5D4037'; ctx.fillRect(x + 9, y, w - 18, h);
+  // End caps
+  ctx.fillStyle = '#795548';
+  ctx.beginPath(); ctx.ellipse(x + 9, y + h/2, 10, h/2, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x + w - 9, y + h/2, 10, h/2, 0, 0, Math.PI*2); ctx.fill();
+  // Grain lines
+  ctx.strokeStyle = '#4E342E'; ctx.lineWidth = 1.5;
+  for (let i = 1; i < 4; i++) {
+    ctx.beginPath(); ctx.moveTo(x + 9, y + (h / 4) * i); ctx.lineTo(x + w - 9, y + (h / 4) * i); ctx.stroke();
+  }
+  // Ring on cap
+  ctx.strokeStyle = '#6D4C41'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.ellipse(x + 9, y + h/2, 4, h/4, 0, 0, Math.PI*2); ctx.stroke();
+}
+
+function drawMushroom(x, y, w, h) {
+  ctx.fillStyle = 'rgba(0,0,0,0.12)';
+  ctx.beginPath(); ctx.ellipse(x + w/2, GROUND_Y + 2, w/2*0.7, 3, 0, 0, Math.PI*2); ctx.fill();
+  // Stem
+  ctx.fillStyle = '#EFEBE9'; ctx.fillRect(x + w*0.3, y + h*0.5, w*0.4, h*0.5);
+  // Cap
+  ctx.fillStyle = '#D32F2F';
+  ctx.beginPath(); ctx.ellipse(x + w/2, y + h*0.5, w/2, h*0.52, 0, 0, Math.PI, true); ctx.fill();
+  // White spots
+  ctx.fillStyle = 'rgba(255,255,255,0.88)';
+  [[x+w*0.3,y+h*0.27,5,4],[x+w*0.62,y+h*0.2,6,5],[x+w*0.14,y+h*0.42,4,3.5]].forEach(([px,py,rx,ry]) => {
+    ctx.beginPath(); ctx.ellipse(px, py, rx, ry, 0, 0, Math.PI*2); ctx.fill();
+  });
+  // Stem highlight
+  ctx.fillStyle = 'rgba(255,255,255,0.28)'; ctx.fillRect(x+w*0.32, y+h*0.52, w*0.1, h*0.44);
+}
+
+function drawRabbit(x, y, w, h) {
+  const hop = Math.sin(frame * 0.18) * 4;
+  ctx.fillStyle = 'rgba(0,0,0,0.12)';
+  ctx.beginPath(); ctx.ellipse(x+w/2, GROUND_Y+2, w/2, 3, 0, 0, Math.PI*2); ctx.fill();
+  // Ears
+  ctx.fillStyle = '#BDBDBD';
+  ctx.beginPath(); ctx.ellipse(x+w*0.54, y+h*0.13, 5, h*0.2, -0.15, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x+w*0.72, y+h*0.11, 5, h*0.18, 0.15, 0, Math.PI*2); ctx.fill();
+  // Inner ears
+  ctx.fillStyle = '#F48FB1';
+  ctx.beginPath(); ctx.ellipse(x+w*0.54, y+h*0.13, 2.5, h*0.12, -0.15, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x+w*0.72, y+h*0.11, 2.5, h*0.11, 0.15, 0, Math.PI*2); ctx.fill();
+  // Body
+  ctx.fillStyle = '#E0E0E0';
+  ctx.beginPath(); ctx.ellipse(x+w*0.5, y+h*0.72, w*0.42, h*0.28, 0, 0, Math.PI*2); ctx.fill();
+  // Head
+  ctx.fillStyle = '#BDBDBD';
+  ctx.beginPath(); ctx.ellipse(x+w*0.68, y+h*0.44, w*0.28, h*0.24, 0, 0, Math.PI*2); ctx.fill();
+  // Eye & nose
+  ctx.fillStyle = '#F48FB1'; ctx.beginPath(); ctx.arc(x+w*0.78, y+h*0.37, 3, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#111';    ctx.beginPath(); ctx.arc(x+w*0.78, y+h*0.37, 1.5, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#F48FB1'; ctx.beginPath(); ctx.arc(x+w*0.92, y+h*0.44, 2, 0, Math.PI*2); ctx.fill();
+  // Tail
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x+w*0.1, y+h*0.72, 6, 0, Math.PI*2); ctx.fill();
+  // Feet
+  ctx.fillStyle = '#BDBDBD';
+  ctx.beginPath(); ctx.ellipse(x+w*0.35, y+h+hop-5, 8, 5, -0.5, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x+w*0.6,  y+h-hop-5, 8, 5,  0.5, 0, Math.PI*2); ctx.fill();
+}
+
+function drawLavaRock(x, y, w, h) {
+  ctx.fillStyle = 'rgba(255,80,0,0.2)';
+  ctx.beginPath(); ctx.ellipse(x+w/2, GROUND_Y+3, w/2, 5, 0, 0, Math.PI*2); ctx.fill();
+  // Body (jagged polygon)
+  ctx.fillStyle = '#1C1C1C';
+  ctx.beginPath();
+  ctx.moveTo(x,       y+h);
+  ctx.lineTo(x+w*0.06,y+h*0.52); ctx.lineTo(x+w*0.2, y+h*0.14);
+  ctx.lineTo(x+w*0.38,y);        ctx.lineTo(x+w*0.52,y+h*0.22);
+  ctx.lineTo(x+w*0.68,y+h*0.08); ctx.lineTo(x+w*0.85,y+h*0.3);
+  ctx.lineTo(x+w,     y+h*0.56); ctx.lineTo(x+w,y+h);
+  ctx.closePath(); ctx.fill();
+  // Glowing cracks
+  ctx.strokeStyle = '#FF4500'; ctx.lineWidth = 1.5;
+  ctx.shadowColor = '#FF4500'; ctx.shadowBlur = 5;
+  ctx.beginPath(); ctx.moveTo(x+w*0.3,y+h*0.32); ctx.lineTo(x+w*0.5,y+h*0.66); ctx.lineTo(x+w*0.66,y+h*0.5); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x+w*0.5,y+h*0.66); ctx.lineTo(x+w*0.4,y+h*0.86); ctx.stroke();
+  ctx.shadowBlur = 0;
+  // Highlight
+  ctx.fillStyle = '#333';
+  ctx.beginPath();
+  ctx.moveTo(x+w*0.2,y+h*0.2); ctx.lineTo(x+w*0.45,y+h*0.06);
+  ctx.lineTo(x+w*0.6,y+h*0.16); ctx.lineTo(x+w*0.4,y+h*0.32); ctx.closePath(); ctx.fill();
+}
+
+function drawFire(x, y, w, h) {
+  const f1 = Math.sin(frame * 0.38) * 4, f2 = Math.cos(frame * 0.52) * 3;
+  ctx.shadowColor = '#FF4500'; ctx.shadowBlur = 20;
+  // Outer (orange)
+  ctx.fillStyle = '#FF4500';
+  ctx.beginPath();
+  ctx.moveTo(x, y+h);
+  ctx.quadraticCurveTo(x-8+f1, y+h*0.5, x+w/2, y+f2);
+  ctx.quadraticCurveTo(x+w+8-f1, y+h*0.5, x+w, y+h);
+  ctx.closePath(); ctx.fill();
+  // Mid (amber)
+  ctx.fillStyle = '#FF8C00';
+  ctx.beginPath();
+  ctx.moveTo(x+w*0.14, y+h);
+  ctx.quadraticCurveTo(x+w*0.06+f1, y+h*0.55, x+w/2, y+h*0.15+f2);
+  ctx.quadraticCurveTo(x+w*0.94-f1, y+h*0.55, x+w*0.86, y+h);
+  ctx.closePath(); ctx.fill();
+  // Inner (yellow)
+  ctx.fillStyle = '#FFD600';
+  ctx.beginPath();
+  ctx.moveTo(x+w*0.3, y+h);
+  ctx.quadraticCurveTo(x+w*0.2+f1*0.5, y+h*0.65, x+w/2, y+h*0.38);
+  ctx.quadraticCurveTo(x+w*0.8-f1*0.5, y+h*0.65, x+w*0.7, y+h);
+  ctx.closePath(); ctx.fill();
+  ctx.shadowBlur = 0;
+  // Base ember glow
+  ctx.fillStyle = 'rgba(255,80,0,0.35)';
+  ctx.beginPath(); ctx.ellipse(x+w/2, GROUND_Y, w*0.7, 5, 0, 0, Math.PI*2); ctx.fill();
+}
+
+function drawSalamander(x, y, w, h) {
+  const bob = Math.sin(frame * 0.35) * 3;
+  ctx.fillStyle = 'rgba(0,0,0,0.12)';
+  ctx.beginPath(); ctx.ellipse(x+w/2, GROUND_Y+2, w/2, 3, 0, 0, Math.PI*2); ctx.fill();
+  // Tail
+  ctx.strokeStyle = '#FF5722'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(x+4, y+h/2);
+  ctx.quadraticCurveTo(x-10, y+h*0.1, x-20, y+h*0.5); ctx.stroke();
+  // Body
+  ctx.fillStyle = '#FF5722';
+  ctx.beginPath(); ctx.ellipse(x+w*0.42, y+h/2, w*0.37, h/2, 0, 0, Math.PI*2); ctx.fill();
+  // Stripes
+  ctx.strokeStyle = '#FF8A65'; ctx.lineWidth = 2;
+  for (let i = 0; i < 3; i++) {
+    ctx.beginPath(); ctx.moveTo(x+w*0.18+i*9, y+h*0.18); ctx.lineTo(x+w*0.18+i*9, y+h*0.82); ctx.stroke();
+  }
+  // Head
+  ctx.fillStyle = '#FF7043';
+  ctx.beginPath(); ctx.ellipse(x+w-5, y+h/2, 10, 7, 0.2, 0, Math.PI*2); ctx.fill();
+  // Eye
+  ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(x+w-1, y+h/2-3, 2, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#FF4500'; ctx.beginPath(); ctx.arc(x+w-0.4, y+h/2-2.5, 0.8, 0, Math.PI*2); ctx.fill();
+  // Legs
+  ctx.strokeStyle = '#E64A19'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+  [[x+w*0.26,-1],[x+w*0.5,1]].forEach(([lx,d]) => {
+    ctx.beginPath(); ctx.moveTo(lx, y+h*0.6); ctx.lineTo(lx-7, y+h+bob*d); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(lx, y+h*0.6); ctx.lineTo(lx+5, y+h-bob*d); ctx.stroke();
+  });
+}
+
+// ─── Power-up Drawing ────────────────────────────────────────────────────────
+function drawPowerups() {
+  powerups.forEach(pu => { ctx.save(); drawPup(pu); ctx.restore(); });
+}
+
+function drawPup(pu) {
+  const cx = pu.x + pu.w / 2, cy = pu.y + pu.h / 2, r = pu.w / 2;
+  const pulse = 0.6 + Math.sin(frame * 0.12) * 0.4;
+
+  if (pu.type === 'star') {
+    ctx.shadowColor = '#FFD600'; ctx.shadowBlur = 14 * pulse;
+    ctx.fillStyle = '#FFD600'; starShape(cx, cy, r, r * 0.42);
+    ctx.fillStyle = '#FFF176'; starShape(cx, cy, r * 0.52, r * 0.2);
+    ctx.shadowBlur = 0;
+
+  } else if (pu.type === 'boots') {
+    ctx.shadowColor = '#FF8C00'; ctx.shadowBlur = 12 * pulse;
+    ctx.fillStyle = '#FFD600'; ctx.strokeStyle = '#FF8C00'; ctx.lineWidth = 1.5;
+    const bx = pu.x, by = pu.y, bw = pu.w, bh = pu.h;
+    ctx.beginPath();
+    ctx.moveTo(bx+bw*0.6, by);
+    ctx.lineTo(bx+bw*0.24, by+bh*0.47); ctx.lineTo(bx+bw*0.52, by+bh*0.47);
+    ctx.lineTo(bx+bw*0.18, by+bh);      ctx.lineTo(bx+bw*0.62, by+bh*0.56);
+    ctx.lineTo(bx+bw*0.4,  by+bh*0.56); ctx.lineTo(bx+bw*0.76, by+bh*0.1);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.shadowBlur = 0;
+
+  } else if (pu.type === 'shield') {
+    ctx.shadowColor = '#42A5F5'; ctx.shadowBlur = 16 * pulse;
+    const g = ctx.createRadialGradient(cx-r*0.3, cy-r*0.3, r*0.08, cx, cy, r);
+    g.addColorStop(0, '#E3F2FD'); g.addColorStop(0.4, '#42A5F5'); g.addColorStop(1, 'rgba(13,71,161,0.08)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#90CAF9'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(cx, cy, r - 2, 0, Math.PI*2); ctx.stroke();
+    // Shield icon
+    ctx.fillStyle = 'rgba(255,255,255,0.72)';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy-r*0.52); ctx.lineTo(cx+r*0.42, cy-r*0.22);
+    ctx.lineTo(cx+r*0.42, cy+r*0.18); ctx.lineTo(cx, cy+r*0.58);
+    ctx.lineTo(cx-r*0.42, cy+r*0.18); ctx.lineTo(cx-r*0.42, cy-r*0.22);
+    ctx.closePath(); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+}
+
+function starShape(cx, cy, outerR, innerR) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = (Math.PI / 5) * i - Math.PI / 2;
+    const r = i % 2 === 0 ? outerR : innerR;
+    i === 0 ? ctx.moveTo(cx + r*Math.cos(a), cy + r*Math.sin(a))
+            : ctx.lineTo(cx + r*Math.cos(a), cy + r*Math.sin(a));
+  }
+  ctx.closePath(); ctx.fill();
+}
+
+// ─── Player Drawing ──────────────────────────────────────────────────────────
+function drawPlayer() {
+  const px = PLAYER_X;
+
+  // Shield aura
+  if (s.shield) {
+    const a = 0.4 + Math.sin(frame * 0.12) * 0.3;
+    ctx.strokeStyle = `rgba(66,165,245,${a})`;
+    ctx.lineWidth = 3; ctx.shadowColor = '#42A5F5'; ctx.shadowBlur = 12;
+    ctx.beginPath(); ctx.ellipse(px + 13, GROUND_Y - PH_RUN/2 - 2, 30, PH_RUN/2 + 9, 0, 0, Math.PI*2); ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+
+  if (p.ducking) {
+    const dy = GROUND_Y - PH_DUCK;
+    // Crouched body
+    ctx.fillStyle = '#1565C0'; rrect(px-5, dy+3, PW+14, PH_DUCK-6, 7); ctx.fill();
+    ctx.fillStyle = '#1976D2'; ctx.fillRect(px-3, dy+4, PW+10, 7);
+    // Head
+    ctx.fillStyle = '#FFCC80'; ctx.beginPath(); ctx.arc(px+PW+5, dy+PH_DUCK/2, 12, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#5D4037'; ctx.beginPath(); ctx.arc(px+PW+3, dy+PH_DUCK/2-6, 10, 0, Math.PI); ctx.fill();
+    ctx.fillStyle = '#333';    ctx.beginPath(); ctx.arc(px+PW+11, dy+PH_DUCK/2-2, 2.5, 0, Math.PI*2); ctx.fill();
+  } else {
+    const py = p.y;
+    const leg = Math.sin(frame * 0.28) * 12;
+    const arm = -leg * 0.6;
+
+    // Legs
+    ctx.strokeStyle = '#0D47A1'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(px+13, py+PH_RUN*0.72); ctx.lineTo(px+13+leg, GROUND_Y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(px+13, py+PH_RUN*0.72); ctx.lineTo(px+13-leg, GROUND_Y); ctx.stroke();
+
+    // Body
+    ctx.fillStyle = '#1565C0'; rrect(px+2, py+PH_RUN*0.3, PW-2, PH_RUN*0.44, 5); ctx.fill();
+    ctx.fillStyle = '#1976D2'; ctx.fillRect(px+2, py+PH_RUN*0.3, PW-2, 8);
+
+    // Arm
+    ctx.strokeStyle = '#1565C0'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(px+14, py+PH_RUN*0.38); ctx.lineTo(px+14+arm, py+PH_RUN*0.62); ctx.stroke();
+
+    // Head
+    ctx.fillStyle = '#FFCC80'; ctx.beginPath(); ctx.arc(px+13, py+PH_RUN*0.22, 14, 0, Math.PI*2); ctx.fill();
+    // Hair
+    ctx.fillStyle = '#5D4037'; ctx.beginPath(); ctx.arc(px+13, py+PH_RUN*0.22, 14, Math.PI, 0); ctx.fill();
+    ctx.fillRect(px, py+PH_RUN*0.22-14, 26, 4);
+    // Face shading
+    ctx.fillStyle = '#FFB74D'; ctx.beginPath(); ctx.arc(px+9, py+PH_RUN*0.2, 6, 0, Math.PI*2); ctx.fill();
+    // Eye
+    ctx.fillStyle = '#333';    ctx.beginPath(); ctx.arc(px+19, py+PH_RUN*0.19, 3, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#fff';    ctx.beginPath(); ctx.arc(px+20, py+PH_RUN*0.18, 1.2, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+// ─── Particles ───────────────────────────────────────────────────────────────
+function drawParticles() {
+  particles.forEach(pt => {
+    const a = Math.max(0, pt.life / (pt.ember ? 60 : 38));
+    ctx.globalAlpha = Math.min(1, a);
+    ctx.fillStyle = pt.color;
+    ctx.beginPath(); ctx.arc(pt.x, pt.y, pt.size * a, 0, Math.PI*2); ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+// ─── HUD ─────────────────────────────────────────────────────────────────────
+function drawHUD() {
+  if (!s.started) return;
+
+  // Score
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 22px "Segoe UI"'; ctx.textAlign = 'right';
+  ctx.fillText(Math.floor(s.score).toLocaleString(), W - 14, 30);
+  ctx.fillStyle = '#888'; ctx.font = '12px "Segoe UI"';
+  ctx.fillText('HI ' + s.hi.toLocaleString(), W - 14, 46);
+
+  // Distance + biome
+  ctx.fillStyle = '#ddd'; ctx.font = 'bold 15px "Segoe UI"'; ctx.textAlign = 'left';
+  ctx.fillText(Math.floor(s.dist) + 'm', 14, 28);
+  const biomeNames = { desert: 'DESERT', forest: 'FOREST', lava: 'LAVA FIELDS' };
+  ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.font = '11px "Segoe UI"';
+  ctx.fillText(biomeNames[s.biome], 14, 44);
+
+  // Active power-ups
+  let px = 14, py = H - 12;
+  if (s.mult > 1) {
+    const fade = s.multTimer < 100 ? s.multTimer / 100 : 1;
+    ctx.globalAlpha = fade;
+    ctx.fillStyle = '#FFD600'; ctx.font = 'bold 13px "Segoe UI"'; ctx.textAlign = 'left';
+    ctx.fillText('* x2 SCORE', px, py); px += 85;
+    ctx.globalAlpha = 1;
+  }
+  if (s.boost) {
+    const fade = s.boostTimer < 100 ? s.boostTimer / 100 : 1;
+    ctx.globalAlpha = fade;
+    ctx.fillStyle = '#FF8C00'; ctx.font = 'bold 13px "Segoe UI"'; ctx.textAlign = 'left';
+    ctx.fillText('~ SPEED BOOST', px, py); px += 105;
+    ctx.globalAlpha = 1;
+  }
+  if (s.shield) {
+    ctx.fillStyle = '#42A5F5'; ctx.font = 'bold 13px "Segoe UI"'; ctx.textAlign = 'left';
+    ctx.fillText('o SHIELD', px, py);
+  }
+  ctx.textAlign = 'left';
+}
+
+function drawBiomeBanner() {
+  const t = s.bannerTick;
+  const a = t < 50 ? t / 50 : t > 150 ? (200 - t) / 50 : 1;
+  ctx.globalAlpha = Math.min(1, a);
+  ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, H/2 - 30, W, 60);
+  ctx.fillStyle = s.bannerColor; ctx.font = 'bold 26px "Segoe UI"'; ctx.textAlign = 'center';
+  ctx.fillText(s.bannerText, W/2, H/2 + 9);
+  ctx.globalAlpha = 1; ctx.textAlign = 'left';
+}
+
+function drawStartScreen() {
+  ctx.fillStyle = 'rgba(0,0,0,0.62)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 34px "Segoe UI"'; ctx.textAlign = 'center';
+  ctx.fillText('BIOME RUNNER', W/2, H/2 - 32);
+  ctx.fillStyle = '#bbb'; ctx.font = '17px "Segoe UI"';
+  ctx.fillText('Press SPACE or  UP  to Start', W/2, H/2 + 8);
+  ctx.fillStyle = '#777'; ctx.font = '13px "Segoe UI"';
+  ctx.fillText('Jump over obstacles  |  Collect power-ups  |  Survive 3 biomes', W/2, H/2 + 36);
+  ctx.textAlign = 'left';
+}
+
+function drawGameOver() {
+  ctx.fillStyle = 'rgba(0,0,0,0.68)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#e94560'; ctx.font = 'bold 36px "Segoe UI"'; ctx.textAlign = 'center';
+  ctx.fillText('GAME OVER', W/2, H/2 - 40);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 22px "Segoe UI"';
+  ctx.fillText('Score: ' + Math.floor(s.score).toLocaleString(), W/2, H/2 - 2);
+  if (s.score > 0 && s.score >= s.hi) {
+    ctx.fillStyle = '#FFD600'; ctx.font = 'bold 15px "Segoe UI"';
+    ctx.fillText('NEW HIGH SCORE!', W/2, H/2 + 24);
+  } else {
+    ctx.fillStyle = '#999'; ctx.font = '14px "Segoe UI"';
+    ctx.fillText('Best: ' + s.hi.toLocaleString(), W/2, H/2 + 24);
+  }
+  ctx.fillStyle = '#aaa'; ctx.font = '15px "Segoe UI"';
+  ctx.fillText('Press SPACE to Restart', W/2, H/2 + 54);
+  ctx.textAlign = 'left';
+}
+
+// ─── Bootstrap ──────────────────────────────────────────────────────────────
+resetGame();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
